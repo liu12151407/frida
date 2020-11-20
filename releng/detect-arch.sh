@@ -1,14 +1,24 @@
 #!/bin/sh
 
-machine=$(uname -m)
-case $machine in
-  i?86)
-    echo x86;
-    ;;
-  aarch64)
-    echo arm64;
-    ;;
-  *)
-    echo $machine
-    ;;
-esac
+if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "$(sysctl -nq hw.optional.arm64)" = "1" ]; then
+    machine=arm64
+  else
+    machine=x86_64
+  fi
+else
+  machine=$(uname -m)
+  case $machine in
+    i?86)
+      machine=x86
+      ;;
+    armv*)
+      machine=armhf
+      ;;
+    aarch64)
+      machine=arm64
+      ;;
+  esac
+fi
+
+echo $machine

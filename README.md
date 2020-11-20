@@ -1,7 +1,7 @@
 # Frida
 
 Dynamic instrumentation toolkit for developers, reverse-engineers, and security
-researchers. Learn more at [www.frida.re](https://www.frida.re/).
+researchers. Learn more at [frida.re](https://frida.re/).
 
 Two ways to install
 ===================
@@ -35,14 +35,14 @@ few packages:
 
 First make a trusted code-signing certificate. You can use the guide at
 https://sourceware.org/gdb/wiki/PermissionsDarwin in the sections
-"Create a certificate in the System Keychain" and "Trust the certificate
-for code signing". You can use the name `frida-cert` instead of `gdb-cert`
+“Create a certificate in the System Keychain” and “Trust the certificate
+for code signing”. You can use the name `frida-cert` instead of `gdb-cert`
 if you'd like.
 
 Next export the name of the created certificate to the environment variables
-`MAC_CERTID` and `IOS_CERTID`, and run `make`:
+`MACOS_CERTID` and `IOS_CERTID`, and run `make`:
 
-    export MAC_CERTID=frida-cert
+    export MACOS_CERTID=frida-cert
     export IOS_CERTID=frida-cert
     make
 
@@ -55,11 +55,11 @@ To ensure that macOS accepts the newly created certificate, restart the
 
     frida.sln
 
-(Requires Visual Studio 2017.)
+(Requires Visual Studio 2019.)
 
-See [https://www.frida.re/docs/building/](https://www.frida.re/docs/building/)
+See [https://frida.re/docs/building/](https://frida.re/docs/building/)
 for details.
 
 ## Learn more
 
-Have a look at our [documentation](https://www.frida.re/docs/home/).
+Have a look at our [documentation](https://frida.re/docs/home/).

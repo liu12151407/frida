@@ -18,7 +18,7 @@ if __name__ == '__main__':
     import tempfile
 
     system = platform.system()
-    worker = sys.argv[1]
+    builder = sys.argv[1]
 
     build_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     if system == 'Darwin':
@@ -33,8 +33,8 @@ if __name__ == '__main__':
 
     if system == 'Windows':
         szip = r"C:\Program Files\7-Zip\7z.exe"
-        ssh = r"C:\Program Files (x86)\PuTTY\plink.exe"
-        scp = r"C:\Program Files (x86)\PuTTY\pscp.exe"
+        ssh = r"C:\Program Files\PuTTY\plink.exe"
+        scp = r"C:\Program Files\PuTTY\pscp.exe"
     else:
         szip = "7z"
         ssh = "ssh"
@@ -62,6 +62,8 @@ if __name__ == '__main__':
         subprocess.call([interpreter, "setup.py"] + targets, cwd=frida_python_dir, env=env)
 
     def upload_python_debs(distro_name, package_name_prefix, interpreter, extension, upload):
+        subprocess.check_call(["make"], cwd=frida_tools_dir)
+
         env = {}
         env.update(os.environ)
         env.update({
@@ -95,26 +97,14 @@ if __name__ == '__main__':
                     os.unlink(package)
 
     def upload_python_rpms(distro_name, package_name_prefix, interpreter, extension, upload):
+        subprocess.check_call(["make"], cwd=frida_tools_dir)
+
         env = {}
         env.update(os.environ)
         env.update({
             'FRIDA_VERSION': version,
             'FRIDA_EXTENSION': extension
         })
-
-        subprocess.check_call([
-            "fpm",
-            "--name={}-prompt-toolkit".format(package_name_prefix),
-            "--version=1.0.15",
-            "--iteration=1." + distro_name,
-            "--maintainer=Ole André Vadla Ravnås <oleavr@frida.re>",
-            "--vendor=Frida",
-            "--python-bin=" + interpreter,
-            "--python-package-name-prefix=" + package_name_prefix,
-            "-s", "python",
-            "-t", "rpm",
-            "prompt-toolkit"
-        ], cwd=frida_python_dir)
 
         for module_dir in [frida_python_dir, frida_tools_dir]:
             subprocess.check_call([
@@ -138,7 +128,7 @@ if __name__ == '__main__':
                 for package in packages:
                     os.unlink(package)
 
-    def upload_node_bindings_to_npm(node, upload_to_github, publish, python2_interpreter=None, extra_build_args=[], extra_build_env=None):
+    def upload_node_bindings_to_npm(node, upload_to_github, publish, extra_build_args=[], extra_build_env=None):
         node_bin_dir = os.path.dirname(node)
         npm = os.path.join(node_bin_dir, "npm")
         if system == 'Windows':
@@ -149,8 +139,6 @@ if __name__ == '__main__':
             'PATH': node_bin_dir + os.pathsep + os.getenv('PATH'),
             'FRIDA': build_dir
         })
-        if python2_interpreter is not None:
-            env['PYTHON'] = python2_interpreter
 
         def do(args, **kwargs):
             quoted_args = []
@@ -169,17 +157,34 @@ if __name__ == '__main__':
             do(env_args + args + extra_build_args)
         def reset():
             do(["git", "clean", "-xffd"])
+            do(["git", "reset", "--hard"])
         reset()
         with package_version_temporarily_set_to(version, frida_node_dir):
             do_build_command([npm, "install"])
             if publish:
                 do([npm, "publish"])
-            do_build_command([npm, "run", "prebuild", "--", "-t", "8.0.0", "-t", "10.0.0", "-t", "12.0.0", "-t", "13.0.0"])
-            do_build_command([npm, "run", "prebuild", "--", "-t", "7.0.0", "-r", "electron"])
+            do_build_command([npm, "run", "prebuild", "--", "-t", "10.0.0", "-t", "12.0.0", "-t", "14.0.0"])
+            do_build_command([npm, "run", "prebuild", "--", "-t", "10.0.0", "-t", "11.0.0-beta.1", "-r", "electron"])
             packages = glob.glob(os.path.join(frida_node_dir, "prebuilds", "*.tar.gz"))
-            for package in packages:
-                with open(package, 'rb') as package_file:
-                    upload_to_github(os.path.basename(package), "application/gzip", package_file.read())
+            for package_path in packages:
+                name = os.path.basename(package_path)
+
+                if "-node-v81-" in name:
+                    continue
+
+                # For Node.js 12.x we need a workaround for https://github.com/lgeiger/node-abi/issues/90
+                new_name = name.replace("-node-v68-", "-node-v72-")
+                if new_name != name:
+                    new_package_path = os.path.join(os.path.dirname(package_path), new_name)
+                    try:
+                        os.rename(package_path, new_package_path)
+                    except FileExistsError:
+                        continue
+                    package_path = new_package_path
+                    name = new_name
+
+                with open(package_path, 'rb') as package_file:
+                    upload_to_github(name, "application/gzip", package_file.read())
         reset()
 
     def upload_meta_modules_to_npm(node):
@@ -227,9 +232,9 @@ if __name__ == '__main__':
                 "cp dists/stable/main/binary-iphoneos-arm/Packages.gz .",
                 "rm -f Packages",
                 "gunzip -k Packages.gz",
-                "s3cmd sync --delete-removed --acl-public pool/ s3://build.frida.re/pool/",
-                "s3cmd put --acl-public Release Packages Packages.gz s3://build.frida.re/",
-                "s3cmd put --acl-public Packages Packages.gz s3://build.frida.re/./",
+                "s3cmd sync --delete-removed pool/ s3://build.frida.re/pool/",
+                "s3cmd put Release Packages Packages.gz s3://build.frida.re/",
+                "s3cmd put Packages Packages.gz s3://build.frida.re/./",
             ])
         ])
         subprocess.call(["cfcli", "purge"] + ["https://build.frida.re" + resource for resource in [
@@ -281,7 +286,7 @@ if __name__ == '__main__':
                 status, data = repo().releases.post(body={
                     'tag_name': tag_name,
                     'name': "Frida {}".format(version),
-                    'body': "See http://www.frida.re/news/ for details.",
+                    'body': "See https://frida.re/news/ for details.",
                 })
             else:
                 raise RuntimeError("Unexpected error trying to get current release; status={} data={}".format(status, data))
@@ -325,21 +330,26 @@ if __name__ == '__main__':
             upload(asset_filename, "application/gzip", data)
 
     def upload_directory(name_template, path, upload):
-        tarball_filename = (name_template + ".tar").format(version=version)
-        asset_filename = tarball_filename + ".xz"
-
         output_dir = tempfile.mkdtemp(prefix="frida-release")
         try:
             dist_dir = os.path.join(output_dir, "dist")
             shutil.copytree(path, dist_dir)
-            subprocess.check_call(["tar", "cf", "../" + tarball_filename, "."], cwd=dist_dir)
-            subprocess.check_call(["xz", "-T", "0", tarball_filename], cwd=output_dir)
+
+            if system == 'Windows':
+                asset_filename = (name_template + ".exe").format(version=version)
+                subprocess.check_call([szip, "a", "-sfx7zCon.sfx", "-r", "..\\" + asset_filename, "."], cwd=dist_dir)
+            else:
+                tarball_filename = (name_template + ".tar").format(version=version)
+                asset_filename = tarball_filename + ".xz"
+                subprocess.check_call(["tar", "cf", "../" + tarball_filename, "."], cwd=dist_dir)
+                subprocess.check_call(["xz", "-T", "0", tarball_filename], cwd=output_dir)
+
             with open(os.path.join(output_dir, asset_filename), 'rb') as f:
-                tarball = f.read()
+                asset_archive = f.read()
         finally:
             shutil.rmtree(output_dir)
 
-        upload(asset_filename, "application/x-xz", tarball)
+        upload(asset_filename, "application/x-xz", asset_archive)
 
     def upload_devkits(host, upload, flavor=""):
         kits = [
@@ -393,69 +403,73 @@ if __name__ == '__main__':
             print("Failed to trigger magisk-frida CI: {}".format(e))
 
     if int(nano) == 0:
-        if worker == 'windows':
+        if builder == 'windows':
             upload = get_github_uploader()
 
-            upload_devkits("windows-x86", upload)
+            upload_devkits("windows-x86",    upload)
             upload_devkits("windows-x86_64", upload)
 
-            upload_file("frida-server-{version}-windows-x86.exe", os.path.join(build_dir, "build", "frida-windows", "Win32-Release", "bin", "frida-server.exe"), upload)
-            upload_file("frida-server-{version}-windows-x86_64.exe", os.path.join(build_dir, "build", "frida-windows", "x64-Release", "bin", "frida-server.exe"), upload)
+            prefix_x86 = os.path.join(build_dir, "build", "frida-windows", "Win32-Release")
+            prefix_x64 = os.path.join(build_dir, "build", "frida-windows", "x64-Release")
 
-            upload_file("frida-gadget-{version}-windows-x86.dll", os.path.join(build_dir, "build", "frida-windows", "Win32-Release", "bin", "frida-gadget.dll"), upload)
-            upload_file("frida-gadget-{version}-windows-x86_64.dll", os.path.join(build_dir, "build", "frida-windows", "x64-Release", "bin", "frida-gadget.dll"), upload)
+            upload_file("frida-server-{version}-windows-x86.exe",    os.path.join(prefix_x86, "bin", "frida-server.exe"), upload)
+            upload_file("frida-server-{version}-windows-x86_64.exe", os.path.join(prefix_x64, "bin", "frida-server.exe"), upload)
 
-            upload_python_bindings_to_pypi(r"C:\Program Files (x86)\Python 2.7\python.exe",
-                os.path.join(build_dir, "build", "frida-windows", "Win32-Release", "lib", "python2.7", "site-packages", "_frida.pyd"))
-            upload_python_bindings_to_pypi(r"C:\Program Files\Python 2.7\python.exe",
-                os.path.join(build_dir, "build", "frida-windows", "x64-Release", "lib", "python2.7", "site-packages", "_frida.pyd"))
-            upload_python_bindings_to_pypi(r"C:\Program Files (x86)\Python 3.7\python.exe",
-                os.path.join(build_dir, "build", "frida-windows", "Win32-Release", "lib", "python3.7", "site-packages", "_frida.pyd"))
-            upload_python_bindings_to_pypi(r"C:\Program Files\Python 3.7\python.exe",
-                os.path.join(build_dir, "build", "frida-windows", "x64-Release", "lib", "python3.7", "site-packages", "_frida.pyd"), sdist=True)
+            upload_file("frida-gadget-{version}-windows-x86.dll",    os.path.join(prefix_x86, "bin", "frida-gadget.dll"), upload)
+            upload_file("frida-gadget-{version}-windows-x86_64.dll", os.path.join(prefix_x64, "bin", "frida-gadget.dll"), upload)
 
-            python2_interpreter=r"C:\Program Files\Python 2.7\python.exe"
-            upload_node_bindings_to_npm(r"C:\Program Files (x86)\nodejs\node.exe", upload, publish=False, python2_interpreter=python2_interpreter)
-            upload_node_bindings_to_npm(r"C:\Program Files\nodejs\node.exe", upload, publish=False, python2_interpreter=python2_interpreter)
+            upload_python_bindings_to_pypi(r"C:\Program Files (x86)\Python 2.7\python.exe", os.path.join(prefix_x86, "lib", "python2.7", "site-packages", "_frida.pyd"))
+            upload_python_bindings_to_pypi(r"C:\Program Files\Python 2.7\python.exe",       os.path.join(prefix_x64, "lib", "python2.7", "site-packages", "_frida.pyd"))
+            upload_python_bindings_to_pypi(r"C:\Program Files (x86)\Python 3.8\python.exe", os.path.join(prefix_x86, "lib", "python3.8", "site-packages", "_frida.pyd"))
+            upload_python_bindings_to_pypi(r"C:\Program Files\Python 3.8\python.exe",       os.path.join(prefix_x64, "lib", "python3.8", "site-packages", "_frida.pyd"), sdist=True)
 
-            upload_file("frida-clr-{version}-windows-x86.dll", os.path.join(build_dir, "build", "frida-windows", "Win32-Release", "bin", "Frida.dll"), upload)
-            upload_file("frida-clr-{version}-windows-x86_64.dll", os.path.join(build_dir, "build", "frida-windows", "x64-Release", "bin", "Frida.dll"), upload)
-        elif worker == 'mac':
+            upload_node_bindings_to_npm(r"C:\Program Files (x86)\nodejs\node.exe", upload, publish=False)
+            upload_node_bindings_to_npm(r"C:\Program Files\nodejs\node.exe",       upload, publish=False)
+
+            upload_file("frida-clr-{version}-windows-x86.dll",    os.path.join(prefix_x86, "bin", "Frida.dll"), upload)
+            upload_file("frida-clr-{version}-windows-x86_64.dll", os.path.join(prefix_x64, "bin", "Frida.dll"), upload)
+
+            upload_directory("frida-qml-{version}-windows-x86",    os.path.join(prefix_x86, "lib", "qt5", "qml"), upload)
+            upload_directory("frida-qml-{version}-windows-x86_64", os.path.join(prefix_x64, "lib", "qt5", "qml"), upload)
+        elif builder == 'macos-modern':
             upload = get_github_uploader()
 
-            upload_devkits("macos-x86", upload)
+            upload_devkits("macos-arm64", upload)
+            upload_devkits("macos-arm64e", upload)
             upload_devkits("macos-x86_64", upload)
-            upload_devkits("ios-x86", upload)
-            upload_devkits("ios-x86_64", upload)
-            upload_devkits("ios-arm", upload)
-            upload_devkits("ios-arm64", upload)
 
+            upload_file("frida-server-{version}-macos-arm64", os.path.join(build_dir, "build", "frida-macos-arm64", "bin", "frida-server"), upload)
+            upload_file("frida-server-{version}-macos-arm64e", os.path.join(build_dir, "build", "frida-macos-arm64e", "bin", "frida-server"), upload)
             upload_file("frida-server-{version}-macos-x86_64", os.path.join(build_dir, "build", "frida-macos-x86_64", "bin", "frida-server"), upload)
-            upload_file("frida-server-{version}-ios-arm", os.path.join(build_dir, "build", "frida-ios-arm", "bin", "frida-server"), upload)
-            upload_file("frida-server-{version}-ios-arm64", os.path.join(build_dir, "build", "frida-ios-arm64", "bin", "frida-server"), upload)
 
             upload_file("frida-gadget-{version}-macos-universal.dylib", os.path.join(build_dir, "build", "frida-macos-universal", "lib", "frida-gadget.dylib"), upload)
-            upload_file("frida-gadget-{version}-ios-universal.dylib", os.path.join(build_dir, "build", "frida-ios-universal", "lib", "frida-gadget.dylib"), upload)
-            upload_file("frida-gadget-{version}-ios-universal.dylib", os.path.join(build_dir, "build", "frida-ios-universal", "lib", "frida-gadget.dylib"), upload, compression='gz')
 
-            upload_directory("frida-swift-{version}-macos-x86_64", os.path.join(build_dir, "frida-swift", "build", "Release"), upload)
-
-            upload_directory("frida-qml-{version}-macos-x86_64", os.path.join(build_dir, "build", "frida-macos-x86_64", "lib", "qt5", "qml"), upload)
+            upload_directory("frida-swift-{version}-macos-universal", os.path.join(build_dir, "frida-swift", "build", "Release"), upload)
 
             upload_python_bindings_to_pypi("/usr/bin/python2.7",
                 os.path.join(build_dir, "build", "frida-macos-universal", "lib", "python2.7", "site-packages", "_frida.so"),
-                { '_PYTHON_HOST_PLATFORM': "macosx-10.9-intel" })
-            upload_python_bindings_to_pypi("/usr/local/bin/python3.6",
-                os.path.join(build_dir, "build", "frida-macos-universal", "lib", "python3.6", "site-packages", "_frida.so"))
+                { '_PYTHON_HOST_PLATFORM': "macosx-11.0-fat64" })
+            upload_python_bindings_to_pypi("/usr/bin/python2.7",
+                os.path.join(build_dir, "build", "frida-macos-x86_64", "lib", "python2.7", "site-packages", "_frida.so"),
+                { '_PYTHON_HOST_PLATFORM': "macosx-10.9-x86_64" })
+            upload_python_bindings_to_pypi("/usr/local/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-macos-apple_silicon", "lib", "python3.8", "site-packages", "_frida.so"),
+                { '_PYTHON_HOST_PLATFORM': "macosx-11.0-arm64" })
+            upload_python_bindings_to_pypi("/usr/local/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-macos-x86_64", "lib", "python3.8", "site-packages", "_frida.so"),
+                { '_PYTHON_HOST_PLATFORM': "macosx-10.9-x86_64" })
 
-            upload_node_bindings_to_npm("/opt/node-64/bin/node", upload, publish=True)
-            upload_meta_modules_to_npm("/opt/node-64/bin/node")
+            upload_node_bindings_to_npm("/usr/local/bin/node", upload, publish=True)
+            upload_meta_modules_to_npm("/usr/local/bin/node")
+        elif builder == 'macos-legacy':
+            upload = get_github_uploader()
 
-            upload_ios_deb("frida", os.path.join(build_dir, "build", "frida-ios-arm64", "bin", "frida-server"), upload)
-            upload_ios_deb("frida32", os.path.join(build_dir, "build", "frida-ios-arm", "bin", "frida-server"), upload)
+            upload_directory("frida-qml-{version}-macos-x86_64", os.path.join(build_dir, "build", "frida-macos-x86_64", "lib", "qt5", "qml"), upload)
+        elif builder == 'macos-dtk':
+            upload = get_github_uploader()
 
-            upload_ios_debug_symbols()
-        elif worker == 'linux-x86':
+            upload_node_bindings_to_npm("/usr/local/bin/node", upload, publish=False)
+        elif builder == 'manylinux-x86_64':
             upload = get_github_uploader()
 
             upload_devkits("linux-x86", upload)
@@ -467,22 +481,67 @@ if __name__ == '__main__':
             upload_file("frida-gadget-{version}-linux-x86.so", os.path.join(build_dir, "build", "frida-linux-x86", "lib", "frida-gadget.so"), upload)
             upload_file("frida-gadget-{version}-linux-x86_64.so", os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "frida-gadget.so"), upload)
 
-            upload_python_bindings_to_pypi("/opt/python27-32/bin/python2.7",
+            upload_python_bindings_to_pypi("/opt/python-32/cp27-cp27mu/bin/python2.7",
                 os.path.join(build_dir, "build", "frida-linux-x86", "lib", "python2.7", "site-packages", "_frida.so"),
                 { 'LD_LIBRARY_PATH': "/opt/python27-32/lib", '_PYTHON_HOST_PLATFORM': "linux-i686" })
-            upload_python_bindings_to_pypi("/opt/python27-64/bin/python2.7",
+            upload_python_bindings_to_pypi("/opt/python-32/cp38-cp38/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-linux-x86", "lib", "python3.8", "site-packages", "_frida.so"),
+                { 'LD_LIBRARY_PATH': "/opt/python36-32/lib", '_PYTHON_HOST_PLATFORM': "linux-i686" })
+            upload_python_bindings_to_pypi("/opt/python-64/cp27-cp27mu/bin/python2.7",
                 os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python2.7", "site-packages", "_frida.so"),
                 { 'LD_LIBRARY_PATH': "/opt/python27-64/lib", '_PYTHON_HOST_PLATFORM': "linux-x86_64" })
-            upload_python_bindings_to_pypi("/opt/python36-32/bin/python3.6",
-                os.path.join(build_dir, "build", "frida-linux-x86", "lib", "python3.6", "site-packages", "_frida.so"),
-                { 'LD_LIBRARY_PATH': "/opt/python36-32/lib", '_PYTHON_HOST_PLATFORM': "linux-i686" })
-            upload_python_bindings_to_pypi("/opt/python36-64/bin/python3.6",
-                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.6", "site-packages", "_frida.so"),
+            upload_python_bindings_to_pypi("/opt/python-64/cp38-cp38/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.8", "site-packages", "_frida.so"),
                 { 'LD_LIBRARY_PATH': "/opt/python36-64/lib", '_PYTHON_HOST_PLATFORM': "linux-x86_64" })
 
             upload_node_bindings_to_npm("/opt/node-32/bin/node", upload, publish=False)
             upload_node_bindings_to_npm("/opt/node-64/bin/node", upload, publish=False)
-        elif worker == 'android':
+        elif builder == 'rpi32':
+            upload = get_github_uploader()
+
+            upload_devkits("linux-armhf", upload, flavor="_thin")
+
+            upload_file("frida-server-{version}-linux-armhf", os.path.join(build_dir, "build", "frida_thin-linux-armhf", "bin", "frida-server"), upload)
+            upload_file("frida-gadget-{version}-linux-armhf.so", os.path.join(build_dir, "build", "frida_thin-linux-armhf", "lib", "frida-gadget.so"), upload)
+
+            upload_python_bindings_to_pypi("/usr/bin/python2.7",
+                os.path.join(build_dir, "build", "frida_thin-linux-armhf", "lib", "python2.7", "site-packages", "_frida.so"))
+            upload_python_bindings_to_pypi("/usr/bin/python3.7",
+                os.path.join(build_dir, "build", "frida_thin-linux-armhf", "lib", "python3.7", "site-packages", "_frida.so"))
+
+            upload_node_bindings_to_npm("/usr/local/bin/node", upload, publish=False)
+        elif builder == 'rpi64':
+            upload = get_github_uploader()
+
+            upload_devkits("linux-arm64", upload, flavor="_thin")
+
+            upload_file("frida-server-{version}-linux-arm64", os.path.join(build_dir, "build", "frida_thin-linux-arm64", "bin", "frida-server"), upload)
+            upload_file("frida-gadget-{version}-linux-arm64.so", os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "frida-gadget.so"), upload)
+
+            upload_python_bindings_to_pypi("/usr/bin/python2.7",
+                os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "python2.7", "site-packages", "_frida.so"))
+            upload_python_bindings_to_pypi("/usr/bin/python3.7",
+                os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "python3.7", "site-packages", "_frida.so"))
+
+            upload_node_bindings_to_npm("/usr/local/bin/node", upload, publish=False)
+        elif builder == 'ios':
+            upload = get_github_uploader()
+
+            upload_devkits("ios-x86_64", upload)
+            upload_devkits("ios-arm64", upload)
+            upload_devkits("ios-arm64e", upload)
+
+            upload_file("frida-server-{version}-ios-arm64", os.path.join(build_dir, "build", "frida-ios-arm64", "bin", "frida-server"), upload)
+            upload_file("frida-server-{version}-ios-arm64e", os.path.join(build_dir, "build", "frida-ios-arm64e", "bin", "frida-server"), upload)
+
+            upload_file("frida-gadget-{version}-ios-universal.dylib", os.path.join(build_dir, "build", "frida-ios-universal", "lib", "frida-gadget.dylib"), upload)
+            upload_file("frida-gadget-{version}-ios-universal.dylib", os.path.join(build_dir, "build", "frida-ios-universal", "lib", "frida-gadget.dylib"), upload, compression='gz')
+
+            upload_ios_deb("frida", os.path.join(build_dir, "build", "frida-ios-arm64", "bin", "frida-server"), upload)
+            upload_ios_deb("frida64", os.path.join(build_dir, "build", "frida-ios-arm64e", "bin", "frida-server"), upload)
+
+            upload_ios_debug_symbols()
+        elif builder == 'android':
             upload = get_github_uploader()
 
             upload_devkits("android-x86", upload)
@@ -506,45 +565,23 @@ if __name__ == '__main__':
             upload_file("frida-gadget-{version}-android-x86_64.so", os.path.join(build_dir, "build", "frida-android-x86_64", "lib", "frida-gadget.so"), upload)
             upload_file("frida-gadget-{version}-android-arm.so", os.path.join(build_dir, "build", "frida-android-arm", "lib", "frida-gadget.so"), upload)
             upload_file("frida-gadget-{version}-android-arm64.so", os.path.join(build_dir, "build", "frida-android-arm64", "lib", "frida-gadget.so"), upload)
-        elif worker == 'ubuntu_16_04-x86_64':
+        elif builder == 'ubuntu_20_04-x86_64':
             upload = get_github_uploader()
 
-            upload_python_debs("ubuntu-xenial", "python", "/usr/bin/python2.7",
-                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python2.7", "site-packages", "_frida.so"),
+            upload_python_debs("ubuntu-focal", "python3", "/usr/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.8", "site-packages", "_frida.so"),
                 upload)
-            upload_python_debs("ubuntu-xenial", "python3", "/usr/bin/python3.5",
-                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.5", "site-packages", "_frida.so"),
-                upload)
-        elif worker == 'ubuntu_16_04-arm64':
+
+            upload_directory("frida-qml-{version}-linux-x86_64", os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "qt5", "qml"), upload)
+        elif builder == 'ubuntu_20_10-x86_64':
             upload = get_github_uploader()
 
-            upload_devkits("linux-arm64", upload)
-
-            upload_file("frida-server-{version}-linux-arm64", os.path.join(build_dir, "build", "frida_thin-linux-arm64", "bin", "frida-server"), upload)
-
-            upload_file("frida-gadget-{version}-linux-arm64.so", os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "frida-gadget.so"), upload)
-
-            upload_python_bindings_to_pypi("/usr/bin/python2.7",
-                os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "python2.7", "site-packages", "_frida.so"))
-            upload_python_bindings_to_pypi("/usr/bin/python3.5",
-                os.path.join(build_dir, "build", "frida_thin-linux-arm64", "lib", "python3.5", "site-packages", "_frida.so"))
-
-            upload_node_bindings_to_npm("/usr/bin/node", upload, publish=False)
-        elif worker == 'ubuntu_18_04-x86_64':
+            upload_python_debs("ubuntu-groovy", "python3", "/usr/bin/python3.8",
+                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.8", "site-packages", "_frida.so"),
+                upload)
+        elif builder == 'fedora_33-x86_64':
             upload = get_github_uploader()
 
-            upload_python_debs("ubuntu-bionic", "python", "/usr/bin/python2.7",
-                os.path.join(build_dir, "build", "frida_thin-linux-x86_64", "lib", "python2.7", "site-packages", "_frida.so"),
-                upload)
-            upload_python_debs("ubuntu-bionic", "python3", "/usr/bin/python3.6",
-                os.path.join(build_dir, "build", "frida_thin-linux-x86_64", "lib", "python3.6", "site-packages", "_frida.so"),
-                upload)
-        elif worker == 'fedora_28-x86_64':
-            upload = get_github_uploader()
-
-            upload_python_rpms("fc28", "python2", "/usr/bin/python2.7",
-                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python2.7", "site-packages", "_frida.so"),
-                upload)
-            upload_python_rpms("fc28", "python3", "/usr/bin/python3.6",
-                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.6", "site-packages", "_frida.so"),
+            upload_python_rpms("fc33", "python3", "/usr/bin/python3.9",
+                os.path.join(build_dir, "build", "frida-linux-x86_64", "lib", "python3.9", "site-packages", "_frida.so"),
                 upload)

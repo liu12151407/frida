@@ -5,19 +5,23 @@ MAKE_J ?= -j 8
 repo_base_url = https://github.com/frida
 repo_suffix := .git
 
-libiconv_version := 1.15
-elfutils_version := 1b1433d5670b75c4bd5c9b598e0b00fba6e82d90
-libdwarf_version := 20190110
-openssl_version := 1.1.1b
-v8_api_version := 7.0
+libiconv_version := 1.16
+elfutils_version := elfutils-0.179
+libdwarf_version := 20200114
+openssl_version := 1.1.1f
+v8_api_version := 8.0
 
+gnu_mirror := saimei.ftp.acc.umu.se/mirror/gnu.org/gnu
+
+
+SHELL := /bin/bash
 
 build_platform := $(shell uname -s | tr '[A-Z]' '[a-z]' | sed 's,^darwin$$,macos,')
 build_arch := $(shell releng/detect-arch.sh)
 build_platform_arch := $(build_platform)-$(build_arch)
 
 ifneq ($(shell which curl),)
-	download := curl -sS
+	download := curl -sSL
 else
 	download := wget -O - -q
 endif
@@ -34,16 +38,20 @@ else
 endif
 host_platform_arch := $(host_platform)-$(host_arch)
 
-enable_v8 := $(shell echo $(host_platform_arch) | egrep -q "^(linux-arm|linux-armbe8|linux-mips|linux-mipsel|linux-mips64|linux-mips64el|qnx-.+)$$" && echo 0 || echo 1)
+enable_v8 := 0
 
 
 ifeq ($(host_platform), macos)
 	iconv := build/fs-%/lib/libiconv.a
+ifeq ($(enable_v8), 1)
 	libcxx := build/fs-%/lib/c++/libc++.a
+endif
 endif
 ifeq ($(host_platform), ios)
 	iconv := build/fs-%/lib/libiconv.a
+ifeq ($(enable_v8), 1)
 	libcxx := build/fs-%/lib/c++/libc++.a
+endif
 endif
 ifeq ($(host_platform), linux)
 	unwind := build/fs-%/lib/pkgconfig/libunwind.pc
@@ -63,10 +71,14 @@ ifeq ($(host_platform), qnx)
 	dwarf := build/fs-%/lib/libdwarf.a
 endif
 ifeq ($(host_platform),$(filter $(host_platform),macos ios linux android))
-	glib_tls_provider := build/fs-%/lib/pkgconfig/glib-openssl-static.pc
+	glib_tls_provider := build/fs-%/lib/pkgconfig/gioopenssl.pc
 endif
 ifeq ($(enable_v8), 1)
 	v8 := build/fs-%/lib/pkgconfig/v8-$(v8_api_version).pc
+endif
+
+ifeq ($(FRIDA_LIBC), uclibc)
+	iconv := build/fs-%/lib/libiconv.a
 endif
 
 ifneq ($(iconv),)
@@ -76,7 +88,7 @@ endif
 
 all: build/sdk-$(host_platform)-$(host_arch).tar.bz2
 	@echo ""
-	@echo "\033[0;32mSuccess!\033[0;39m Here's your SDK: \033[1m$<\033[0m"
+	@echo -e "\\033[0;32mSuccess"'!'"\\033[0;39m Here's your SDK: \\033[1m$<\\033[0m"
 	@echo ""
 	@echo "It will be picked up automatically if you now proceed to build Frida."
 	@echo ""
@@ -125,7 +137,7 @@ build/fs-tmp-%/.package-stamp: \
 			share/glib-2.0/schemas \
 			share/vala \
 			| tar -C $(abspath $(@D)/package) -xf -
-	releng/relocatify.sh $(@D)/package $(abspath build/fs-$*)
+	releng/relocatify.sh $(@D)/package $(abspath build/fs-$*) $(abspath releng)
 ifeq ($(host_platform), ios)
 	cp $(shell xcrun --sdk macosx --show-sdk-path)/usr/include/mach/mach_vm.h $(@D)/package/include/frida_mach_vm.h
 endif
@@ -136,8 +148,7 @@ build/.libiconv-stamp:
 	$(RM) -r libiconv
 	mkdir libiconv
 	cd libiconv \
-		&& $(download) https://gnuftp.uib.no/libiconv/libiconv-$(libiconv_version).tar.gz | tar -xz --strip-components 1 \
-		&& patch -p1 < ../releng/patches/libiconv-android.patch
+		&& $(download) https://$(gnu_mirror)/libiconv/libiconv-$(libiconv_version).tar.gz | tar -xz --strip-components 1
 	@mkdir -p $(@D)
 	@touch $@
 
@@ -146,11 +157,7 @@ build/fs-tmp-%/libiconv/Makefile: build/fs-env-%.rc build/.libiconv-stamp
 	mkdir -p $(@D)
 	. $< \
 		&& cd $(@D) \
-		&& ../../../libiconv/configure \
-			--enable-static \
-			--disable-shared \
-			--enable-relocatable \
-			--disable-rpath
+		&& ../../../libiconv/configure
 
 build/fs-%/lib/libiconv.a: build/fs-env-%.rc build/fs-tmp-%/libiconv/Makefile
 	. $< \
@@ -165,9 +172,11 @@ build/.elfutils-stamp: build/fs-env-$(build_platform_arch).rc
 	git clone git://sourceware.org/git/elfutils.git
 	. $< \
 		&& cd elfutils \
-		&& git checkout $(elfutils_version) \
+		&& git checkout -b release $(elfutils_version) \
 		&& patch -p1 < ../releng/patches/elfutils-clang.patch \
 		&& patch -p1 < ../releng/patches/elfutils-android.patch \
+		&& patch -p1 < ../releng/patches/elfutils-glibc-compatibility.patch \
+		&& patch -p1 < ../releng/patches/elfutils-musl.patch \
 		&& autoreconf -ifv
 	@mkdir -p $(@D)
 	@touch $@
@@ -228,6 +237,12 @@ $1/configure: build/fs-env-$(build_platform_arch).rc build/.$1-stamp
 	. $$< \
 		&& cd $$(@D) \
 		&& [ -f autogen.sh ] && NOCONFIGURE=1 ./autogen.sh || autoreconf -ifv
+	if [ -n "$5" ]; then \
+		cd $$(@D); \
+		for patch in $5; do \
+			patch -p1 < ../releng/patches/$$$$patch; \
+		done; \
+	fi
 
 build/fs-tmp-%/$1/Makefile: build/fs-env-%.rc $1/configure $3
 	$(RM) -r $$(@D)
@@ -251,19 +266,14 @@ build/.$1-stamp:
 
 build/fs-tmp-%/$1/build.ninja: build/fs-env-$(build_platform_arch).rc build/fs-env-%.rc build/.$1-stamp $3 releng/meson/meson.py
 	$(RM) -r $$(@D)
-	(. build/fs-meson-env-$(build_platform_arch).rc \
+	(. build/fs-meson-env-$$*.rc \
 		&& . build/fs-config-$$*.site \
-		&& if [ $$* = $(build_platform_arch) ]; then \
-			cross_args=""; \
-		else \
-			cross_args="--cross-file build/fs-$$*.txt"; \
-		fi \
 		&& $(MESON) \
+			--cross-file build/fs-$$*.txt \
 			--prefix $$$$frida_prefix \
 			--libdir $$$$frida_prefix/lib \
 			--default-library static \
-			$$(FRIDA_SDK_FLAGS) \
-			$$$$cross_args \
+			$$(FRIDA_MESONFLAGS_BOTTLE) \
 			$4 \
 			$$(@D) \
 			$1)
@@ -276,7 +286,7 @@ endef
 
 $(eval $(call make-git-meson-module-rules,zlib,build/fs-%/lib/pkgconfig/zlib.pc,))
 
-$(eval $(call make-git-autotools-module-rules,xz,build/fs-%/lib/pkgconfig/liblzma.pc,))
+$(eval $(call make-git-autotools-module-rules,xz,build/fs-%/lib/pkgconfig/liblzma.pc,,,xz-uclibc.patch))
 
 $(eval $(call make-git-meson-module-rules,sqlite,build/fs-%/lib/pkgconfig/sqlite3.pc,,))
 
@@ -284,19 +294,19 @@ $(eval $(call make-git-autotools-module-rules,libunwind,build/fs-%/lib/pkgconfig
 
 $(eval $(call make-git-meson-module-rules,libffi,build/fs-%/lib/pkgconfig/libffi.pc,,))
 
-$(eval $(call make-git-meson-module-rules,glib,build/fs-%/lib/pkgconfig/glib-2.0.pc,$(iconv) build/fs-%/lib/pkgconfig/zlib.pc build/fs-%/lib/pkgconfig/libffi.pc,$(glib_iconv_option) -Dselinux=disabled -Dxattr=false -Dlibmount=false -Dinternal_pcre=true -Dtests=false))
+$(eval $(call make-git-meson-module-rules,glib,build/fs-%/lib/pkgconfig/glib-2.0.pc,$(iconv) build/fs-%/lib/pkgconfig/zlib.pc build/fs-%/lib/pkgconfig/libffi.pc,$(glib_iconv_option) -Dselinux=disabled -Dxattr=false -Dlibmount=disabled -Dinternal_pcre=true -Dtests=false))
 
-$(eval $(call make-git-meson-module-rules,glib-openssl,build/fs-%/lib/pkgconfig/glib-openssl-static.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc build/fs-%/lib/pkgconfig/openssl.pc,-Dca_certificates=no))
+$(eval $(call make-git-meson-module-rules,glib-networking,build/fs-%/lib/pkgconfig/gioopenssl.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc build/fs-%/lib/pkgconfig/openssl.pc,-Dgnutls=disabled -Dopenssl=enabled -Dlibproxy=disabled -Dgnome_proxy=disabled -Dstatic_modules=true))
 
 $(eval $(call make-git-meson-module-rules,libgee,build/fs-%/lib/pkgconfig/gee-0.8.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc))
 
-$(eval $(call make-git-meson-module-rules,json-glib,build/fs-%/lib/pkgconfig/json-glib-1.0.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc,-Dintrospection=false -Dtests=false))
+$(eval $(call make-git-meson-module-rules,json-glib,build/fs-%/lib/pkgconfig/json-glib-1.0.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc,-Dintrospection=disabled -Dtests=false))
 
-$(eval $(call make-git-meson-module-rules,libpsl,build/fs-%/lib/pkgconfig/libpsl.pc,,))
+$(eval $(call make-git-meson-module-rules,libpsl,build/fs-%/lib/pkgconfig/libpsl.pc,,-Dtests=false))
 
 $(eval $(call make-git-meson-module-rules,libxml2,build/fs-%/lib/pkgconfig/libxml-2.0.pc,build/fs-%/lib/pkgconfig/zlib.pc build/fs-%/lib/pkgconfig/liblzma.pc,))
 
-$(eval $(call make-git-meson-module-rules,libsoup,build/fs-%/lib/pkgconfig/libsoup-2.4.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc build/fs-%/lib/pkgconfig/sqlite3.pc build/fs-%/lib/pkgconfig/libpsl.pc build/fs-%/lib/pkgconfig/libxml-2.0.pc,-Dgssapi=false -Dtls_check=false -Dgnome=false -Dintrospection=false -Dvapi=false -Dtests=false))
+$(eval $(call make-git-meson-module-rules,libsoup,build/fs-%/lib/pkgconfig/libsoup-2.4.pc,build/fs-%/lib/pkgconfig/glib-2.0.pc build/fs-%/lib/pkgconfig/sqlite3.pc build/fs-%/lib/pkgconfig/libpsl.pc build/fs-%/lib/pkgconfig/libxml-2.0.pc,-Dgssapi=disabled -Dtls_check=false -Dgnome=false -Dintrospection=disabled -Dvapi=disabled -Dtests=false))
 
 
 ifeq ($(FRIDA_ASAN), yes)
@@ -316,6 +326,14 @@ ifeq ($(host_platform_arch), macos-x86)
 endif
 ifeq ($(host_platform_arch), macos-x86_64)
 	openssl_arch_args := macos64-x86_64 enable-ec_nistp_64_gcc_128
+	xcode_platform := MacOSX
+endif
+ifeq ($(host_platform_arch), macos-arm64)
+	openssl_arch_args := macos64-cross-arm64 enable-ec_nistp_64_gcc_128
+	xcode_platform := MacOSX
+endif
+ifeq ($(host_platform_arch), macos-arm64e)
+	openssl_arch_args := macos64-cross-arm64e enable-ec_nistp_64_gcc_128
 	xcode_platform := MacOSX
 endif
 ifeq ($(host_platform_arch), ios-x86)
@@ -342,11 +360,15 @@ endif
 		CPP=clang CC=clang CXX=clang++ LD= LDFLAGS= AR= RANLIB= \
 		CROSS_COMPILE="$(xcode_developer_dir)/Toolchains/XcodeDefault.xctoolchain/usr/bin/" \
 		CROSS_TOP="${xcode_developer_dir}/Platforms/$(xcode_platform).platform/Developer" \
-		CROSS_SDK=$(xcode_platform)$(shell xcrun --sdk $(shell echo $(xcode_platform) | tr A-Z a-z) --show-sdk-version).sdk \
-		MACOS_MIN_SDK_VERSION=10.9 \
-		IOS_MIN_SDK_VERSION=7.0 \
+		CROSS_SDK=$(xcode_platform)$(shell xcrun --sdk $(shell echo $(xcode_platform) | tr A-Z a-z) --show-sdk-version | cut -f1-2 -d'.').sdk \
+		IOS_MIN_SDK_VERSION=8.0 \
 		CONFIG_DISABLE_BITCODE=true \
 		$(NULL)
+ifeq ($(host_platform_arch),$(filter $(host_platform_arch),macos-arm64 macos-arm64e))
+	openssl_host_env += MACOS_MIN_SDK_VERSION=10.16
+else
+	openssl_host_env += MACOS_MIN_SDK_VERSION=10.9
+endif
 endif
 ifeq ($(host_platform), linux)
 ifeq ($(host_arch), x86)
@@ -356,6 +378,9 @@ ifeq ($(host_arch), x86_64)
 	openssl_arch_args := linux-x86_64 enable-ec_nistp_64_gcc_128
 endif
 ifeq ($(host_arch), arm)
+	openssl_arch_args := linux-armv4
+endif
+ifeq ($(host_arch), armhf)
 	openssl_arch_args := linux-armv4
 endif
 ifeq ($(host_arch), armbe8)
@@ -391,7 +416,7 @@ ifeq ($(host_arch), x86_64)
 	ndk_triplet := x86_64-linux-android
 endif
 ifeq ($(host_arch), arm)
-	openssl_arch_args := android-arm -D__ANDROID_API__=18 -D__ARM_MAX_ARCH__=7
+	openssl_arch_args := android-arm -D__ANDROID_API__=18 -D__ARM_MAX_ARCH__=7 -fno-integrated-as
 	ndk_abi := arm-linux-androideabi
 	ndk_triplet := arm-linux-androideabi
 endif
@@ -458,6 +483,7 @@ v8_common_args := \
 	v8_enable_i18n_support=false \
 	v8_untrusted_code_mitigations=false \
 	treat_warnings_as_errors=false \
+	fatal_linker_warnings=false \
 	use_glib=false \
 	use_goma=false \
 	v8_embedder_string="-frida" \
@@ -467,7 +493,6 @@ ifeq ($(FRIDA_ASAN), yes)
 v8_buildtype_args := \
 	is_asan=true \
 	symbol_level=1 \
-	strip_absolute_paths_from_debug_symbols=false \
 	$(NULL)
 else
 v8_buildtype_args := \
@@ -475,15 +500,7 @@ v8_buildtype_args := \
 	is_debug=false \
 	v8_enable_v8_checks=false \
 	symbol_level=0 \
-	strip_absolute_paths_from_debug_symbols=true \
 	$(NULL)
-endif
-
-ifeq ($(host_platform_arch), android-x86_64)
-v8_arch_args := v8_enable_embedded_builtins=false
-endif
-ifneq ($(host_arch), x86_64)
-v8_arch_args := v8_enable_embedded_builtins=false
 endif
 
 ifeq ($(host_arch), x86)
@@ -494,43 +511,48 @@ ifeq ($(host_arch), x86_64)
 endif
 ifeq ($(host_arch), arm)
 	v8_cpu := arm
-	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp"
+	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp" arm_use_neon=false
 endif
 ifeq ($(host_arch), armbe8)
 	v8_cpu := arm
-	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp"
+	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp" arm_use_neon=false
 endif
 ifeq ($(host_arch), armeabi)
 	v8_cpu := arm
-	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp"
+	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="softfp" arm_use_neon=false
 endif
 ifeq ($(host_arch), armhf)
 	v8_cpu := arm
-	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="hard"
+	v8_cpu_args := arm_version=7 arm_fpu="vfpv3-d16" arm_float_abi="hard" arm_use_neon=false
 endif
 ifeq ($(host_arch), arm64)
 	v8_cpu := arm64
 endif
 ifeq ($(host_arch), arm64e)
 	v8_cpu := arm64
-	v8_cpu_args := arm64_version=83
+	v8_cpu_args := arm_version=83
 endif
 
 v8_build_platform := $(shell echo $(build_platform) | sed 's,^macos$$,mac,')
 ifeq ($(host_platform), macos)
 	v8_os := mac
-	v8_platform_args := \
-		libcxx_abi_unstable=false \
-		mac_deployment_target="10.9.0" \
-		$(NULL)
-ifeq ($(FRIDA_ASAN), yes)
+	v8_platform_args := libcxx_abi_unstable=false
+ifeq ($(host_arch),$(filter $(host_arch),arm64 arm64e))
+	v8_platform_args += mac_deployment_target="10.16.0"
+else
+	v8_platform_args += mac_deployment_target="10.9.0"
+endif
+ifeq ($(host_arch),$(filter $(host_arch),arm64 arm64e))
 	v8_platform_args += \
 		use_xcode_clang=true \
+		v8_enable_pointer_compression=false \
 		$(NULL)
 else
-	v8_platform_args += \
-		use_xcode_clang=false \
-		$(NULL)
+ifeq ($(FRIDA_ASAN), yes)
+	v8_platform_args += use_xcode_clang=true
+else
+	v8_platform_args += use_xcode_clang=false
+endif
 endif
 endif
 ifeq ($(host_platform), ios)
@@ -539,8 +561,11 @@ ifeq ($(host_platform), ios)
 		use_xcode_clang=true \
 		libcxx_abi_unstable=false \
 		mac_deployment_target="10.9.0" \
-		ios_deployment_target="7.0" \
+		ios_deployment_target="8.0" \
 		$(NULL)
+ifeq ($(host_arch),$(filter $(host_arch),arm64 arm64e))
+	v8_platform_args += v8_enable_pointer_compression=false
+endif
 endif
 ifeq ($(host_platform), linux)
 	v8_os := linux
@@ -559,12 +584,19 @@ ifeq ($(host_platform), android)
 		use_xcode_clang=true \
 		use_custom_libcxx=false \
 		android_ndk_root="$(ANDROID_NDK_ROOT)" \
-		android_ndk_version="r20" \
-		android_ndk_major_version=20 \
+		android_ndk_version="r21" \
+		android_ndk_major_version=21 \
 		android32_ndk_api_level=18 \
 		android64_ndk_api_level=21 \
 		clang_base_path="$(abspath $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/$(ndk_build_platform_arch))"
 	v8_libs_private := "-llog -lm"
+endif
+
+ifneq ($(MACOS_SDK_ROOT),)
+	v8_platform_args += mac_sdk_path="$(MACOS_SDK_ROOT)"
+endif
+ifneq ($(IOS_SDK_ROOT),)
+	v8_platform_args += ios_sdk_path="$(IOS_SDK_ROOT)"
 endif
 
 gn:
@@ -574,7 +606,6 @@ gn:
 build/fs-tmp-%/gn/build.ninja: build/fs-env-%.rc gn
 	. $< \
 		&& CC="$$CC" CXX="$$CXX" python gn/build/gen.py \
-			--no-sysroot \
 			--out-path $(abspath $(@D))
 
 build/fs-tmp-%/gn/gn: build/fs-tmp-%/gn/build.ninja
@@ -586,7 +617,7 @@ v8-checkout/depot_tools/gclient:
 	git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git v8-checkout/depot_tools
 
 v8-checkout/.gclient: v8-checkout/depot_tools/gclient
-	cd v8-checkout && depot_tools/gclient config --spec 'solutions = [ \
+	cd v8-checkout && PATH=$(abspath v8-checkout/depot_tools):$$PATH depot_tools/gclient config --spec 'solutions = [ \
   { \
     "url": "$(repo_base_url)/v8.git", \
     "managed": False, \
@@ -594,20 +625,17 @@ v8-checkout/.gclient: v8-checkout/depot_tools/gclient
     "deps_file": "DEPS", \
     "custom_deps": {}, \
   }, \
-] \
-'
+]'
 
 v8-checkout/v8: v8-checkout/.gclient
-	cd v8-checkout \
-		&& export PATH=$(abspath v8-checkout/depot_tools):$$PATH \
-		&& gclient sync
+	cd v8-checkout && PATH=$(abspath v8-checkout/depot_tools):$$PATH gclient sync
 	@touch $@
 
 build/fs-tmp-%/v8/build.ninja: v8-checkout/v8 build/fs-tmp-$(build_platform_arch)/gn/gn
 	cd v8-checkout/v8 \
 		&& ../../build/fs-tmp-$(build_platform_arch)/gn/gn \
 			gen $(abspath $(@D)) \
-			--args='target_os="$(v8_os)" target_cpu="$(v8_cpu)" $(v8_cpu_args) $(v8_common_args) $(v8_buildtype_args) $(v8_arch_args) $(v8_platform_args)'
+			--args='target_os="$(v8_os)" target_cpu="$(v8_cpu)" $(v8_cpu_args) $(v8_common_args) $(v8_buildtype_args) $(v8_platform_args)'
 
 build/fs-tmp-%/v8/obj/libv8_monolith.a: build/fs-tmp-%/v8/build.ninja
 	$(NINJA) -C build/fs-tmp-$*/v8 v8_monolith
@@ -623,13 +651,18 @@ build/fs-%/lib/pkgconfig/v8-$(v8_api_version).pc: build/fs-tmp-%/v8/obj/libv8_mo
 	install -d build/fs-$*/lib
 	install -m 644 $< build/fs-$*/lib/libv8-$(v8_api_version).a
 	install -d $(@D)
+	$(PYTHON3) releng/v8.py \
+		patch build/fs-$*/include/v8-$(v8_api_version)/v8/v8config.h \
+		-s v8-checkout/v8 \
+		-b build/fs-tmp-$*/v8 \
+		-G build/fs-tmp-$(build_platform_arch)/gn/gn
 	echo "prefix=\$${frida_sdk_prefix}" > $@.tmp
 	echo "libdir=\$${prefix}/lib" >> $@.tmp
 	echo "includedir=\$${prefix}/include/v8-$(v8_api_version)" >> $@.tmp
 	echo "" >> $@.tmp
 	echo "Name: V8" >> $@.tmp
 	echo "Description: V8 JavaScript Engine" >> $@.tmp
-	echo "Version: $$(python releng/v8.py v8-checkout/v8 version)" >> $@.tmp
+	echo "Version: $$($(PYTHON3) releng/v8.py get version -s v8-checkout/v8)" >> $@.tmp
 	echo "Libs: -L\$${libdir} -lv8-$(v8_api_version)" >> $@.tmp
 ifdef v8_libs_private
 	echo Libs.private: $(v8_libs_private) >> $@.tmp
@@ -647,7 +680,6 @@ build/fs-%/lib/c++/libc++.a: build/fs-tmp-%/v8/obj/libv8_monolith.a
 		echo "#ifndef _LIBCPP_CONFIG_SITE"; \
 		echo "#define _LIBCPP_CONFIG_SITE"; \
 		echo ""; \
-		echo "#define _LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS"; \
 		echo "#define _LIBCPP_HAS_NO_ALIGNED_ALLOCATION"; \
 		echo "#define _LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS"; \
 		echo "#define _LIBCPP_ENABLE_NODISCARD"; \
@@ -669,8 +701,8 @@ build/fs-%/lib/c++/libc++.a: build/fs-tmp-%/v8/obj/libv8_monolith.a
 
 build/fs-env-%.rc:
 	FRIDA_HOST=$* \
-		FRIDA_OPTIMIZATION_FLAGS="$(FRIDA_SDK_OPTIMIZATION_FLAGS)" \
-		FRIDA_DEBUG_FLAGS="$(FRIDA_SDK_DEBUG_FLAGS)" \
+		FRIDA_ACOPTFLAGS="$(FRIDA_ACOPTFLAGS_BOTTLE)" \
+		FRIDA_ACDBGFLAGS="$(FRIDA_ACDBGFLAGS_BOTTLE)" \
 		FRIDA_ASAN=$(FRIDA_ASAN) \
 		FRIDA_ENV_NAME=fs \
 		FRIDA_ENV_SDK=none \
